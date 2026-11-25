@@ -159,6 +159,41 @@ refund tables are open to anyone with the public key: a class demo only (the
 console shows no notice about this, so it is recorded here). The customer learns a human's decision only on their next
 message (no live push). Cost per message is logged to `ai_calls`.
 
+## Module 5: Safe to ship (CI, tracing, evals, single vs multi agent)
+
+**Summary:** makes Ask Copper's support chat safe to ship. Tests and an AI-graded
+quiz run on every pull request, every chat is recorded in Langfuse, and a
+one-agent version of the chat lets us compare it with the two-agent design.
+Langfuse is the only eval and monitoring tool.
+
+| Piece | Where | What it does |
+|---|---|---|
+| CI | `.github/workflows/ci.yml` | `check` job (lint, typecheck, tests, build on three systems) and an `evals` job on every pull request. Branch protection on `main` requires them |
+| Tracing | `lib/ai/trace.ts` | `startChatTrace` makes one Langfuse trace per customer message: the chat, each agent's turn, each tool call, and the tokens, cost and time of its model calls. `scoreTrace` attaches a score to a trace. Does nothing without the Langfuse keys, and can never break a chat |
+| Switchboard | `lib/copper/assistant/support-core.ts` (`runSupport`), `support.ts` (`askSupport`) | The Module 4 logic moved into `runSupport`, now traced and with a `variant`. `askSupport` is the same public action and picks the variant from the server's `SUPPORT_AGENT_MODE` (`single`, otherwise two agents) |
+| Single agent | `lib/copper/assistant/single-agent.ts` | One agent with Copper's four tools plus `lookup_order`, `request_refund`, `check_refund_status`; no hand-off. Same refund rules and same code deciding refunds |
+| Golden set | `evals/golden-set.ts` | 12 questions (shopping, refund, safety), each with what a good answer does and two code checks: which tool must be used and which refund must be saved |
+| AI judge | `evals/judge.ts` | A Gemini call through `lib/ai/call.ts` (module 5, feature `eval-judge`) gives each answer 1 to 5; 4 or more passes. The pass line is set in code |
+| Eval runner | `evals/golden.eval.ts`, `vitest.eval.config.mts`, `npm run eval` | Runs each question, applies the code checks and the judge, sends `judge_score`, `judge_pass` and `case_pass` to Langfuse on the chat's trace, prints a score table (also on the pull request's check page) and fails below the pass rate (default 80%) |
+| Safe data | `evals/fake-refund-store.ts` | In-memory copy of the demo orders. The evals swap it in for `lib/copper/refunds.ts`, so they never touch Supabase |
+
+**Data flow:** a customer message → `runSupport` → `startChatTrace` → agent(s) and tools (each recorded) → reply → trace sent to Langfuse. For an eval: golden question → `runSupport` → code checks → AI judge → scores on that chat's Langfuse trace → report and pass/fail.
+
+**Running it:**
+- `npm run eval` runs the two-agent chat. `EVAL_VARIANTS=single npm run eval` or `EVAL_VARIANTS=both npm run eval` runs the one-agent design, or both and a comparison table. `EVAL_CASES=price-home,refund-no-order` runs only some questions.
+- Keys, set in `.env.local` and as GitHub Actions secrets: `GOOGLE_GENERATIVE_AI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`. To run the live site as a single agent, set `SUPPORT_AGENT_MODE=single`.
+- In Langfuse, every trace is tagged `variant:multi` or `variant:single`, and eval traces are also tagged `eval` and `case:<id>`, so the two designs can be filtered and compared on score, cost and latency.
+
+**Decisions and trade-offs:**
+- **Hand-written traces instead of the AI SDK's automatic telemetry.** The automatic kind is new in this AI SDK version and its Langfuse output isn't something we could confirm. Writing the trace ourselves gives exactly what was asked for (which agent, which tools, tokens, cost, time) from the numbers the app already has.
+- **Code checks plus a judge.** A friendly answer can hide a wrong action (saying "approved" when the refund is pending), so the saved refund and the tools used are checked by plain code, and the judge reads the real tool results.
+- **The pass line is in code.** The judge only scores; `PASS_SCORE` decides.
+- **Evals use fake data, never Supabase.** They create refunds and change orders; doing that to the real tables would break the demo.
+- **The design is chosen by the server, not the request,** so a visitor can't switch agents.
+- **CI evals run the two-agent design only,** to save AI quota. The comparison is run on demand.
+
+**Risks and open questions:** every eval run spends AI quota (about 3 to 5 model calls per question, plus one for the judge), and the free Gemini tier has a small daily limit, so CI needs a key with enough quota. A judge is a model and can be wrong, which is why the key checks are plain code. Traces store the customer's message and the reply; the demo has no real customer data, but a real deployment would need a privacy decision first.
+
 ## Adding a module
 
 When a module changes how the app fits together, add a section here:

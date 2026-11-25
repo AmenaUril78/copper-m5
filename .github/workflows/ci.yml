@@ -30,3 +30,49 @@ jobs:
         run: |
           npm run check | tee check.txt || true
           grep -q "criteria passed" check.txt
+
+  # Module 5: grade Ask Copper's answers with an AI judge on every pull request.
+  # The score table appears on this check's summary page, and the scores and
+  # traces go to Langfuse. Branch protection on main requires this check, so a
+  # pull request whose pass rate is too low can't be merged.
+  # Needs these repository secrets (Settings > Secrets and variables > Actions):
+  #   GOOGLE_GENERATIVE_AI_API_KEY, AI_MODEL, LANGFUSE_PUBLIC_KEY,
+  #   LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL
+  evals:
+    name: evals
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # A newer push to the same pull request replaces the older run, to save AI quota.
+    concurrency:
+      group: evals-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Golden-set evals (AI judge)
+        run: npm run eval
+        env:
+          GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+          EVAL_VARIANTS: multi
+          # The free Gemini key allows about 5 requests a minute and about 20
+          # a day, so CI runs a representative 3 of the 12 questions, slowly.
+          # Remove EVAL_CASES (and EVAL_PAUSE_MS) with a paid key to run all 12.
+          EVAL_CASES: price-home,refund-under-limit,refund-over-limit
+          EVAL_PAUSE_MS: "62000"
+      - name: Keep the eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: eval-results/
+          if-no-files-found: ignore
